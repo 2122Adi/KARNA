@@ -1,4 +1,4 @@
-# ⚡ KARNA
+# ⚡ KARNA uage: python3 karna.py -d testphp.vulnweb.com/#/popular --all
 
 ### Advanced Bug Bounty Recon & Vulnerability Hunting Tool
 
