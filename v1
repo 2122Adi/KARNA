@@ -1,0 +1,679 @@
+#!/usr/bin/env python3
+"""
+╔═══════════════════════════════════════════════════════════════╗
+║                        K A R N A                              ║
+║           Advanced Bug Bounty Recon & Hunt Tool               ║
+║                  by Aditya Bhosale                            ║
+║          Focused on Overlooked, High-Impact Bugs              ║
+╚═══════════════════════════════════════════════════════════════╝
+"""
+
+import argparse
+import sys
+import os
+import re
+import json
+import time
+import socket
+import ssl
+import urllib.request
+import urllib.parse
+import urllib.error
+import threading
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ─────────────────────────────────────────────
+#  COLOR OUTPUT
+# ─────────────────────────────────────────────
+class C:
+    RED    = "\033[91m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE   = "\033[94m"
+    CYAN   = "\033[96m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+    ORANGE = "\033[38;5;208m"
+    PURPLE = "\033[95m"
+
+def banner():
+    print(f"""{C.ORANGE}{C.BOLD}
+  ██╗  ██╗ █████╗ ██████╗ ███╗   ██╗ █████╗ 
+  ██║ ██╔╝██╔══██╗██╔══██╗████╗  ██║██╔══██╗
+  █████╔╝ ███████║██████╔╝██╔██╗ ██║███████║
+  ██╔═██╗ ██╔══██║██╔══██╗██║╚██╗██║██╔══██║
+  ██║  ██╗██║  ██║██║  ██║██║ ╚████║██║  ██║
+  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝
+{C.RESET}{C.CYAN}       Advanced Bug Bounty Hunter v1.0
+{C.DIM}            by Aditya Bhosale
+       Focused on Overlooked High-Impact Bugs{C.RESET}
+""")
+
+def ok(msg):    print(f"  {C.GREEN}[+]{C.RESET} {msg}")
+def warn(msg):  print(f"  {C.YELLOW}[!]{C.RESET} {msg}")
+def err(msg):   print(f"  {C.RED}[-]{C.RESET} {msg}")
+def info(msg):  print(f"  {C.BLUE}[*]{C.RESET} {msg}")
+def vuln(msg):  print(f"  {C.RED}{C.BOLD}[VULN]{C.RESET} {C.RED}{msg}{C.RESET}")
+def high(msg):  print(f"  {C.ORANGE}{C.BOLD}[HIGH]{C.RESET} {C.ORANGE}{msg}{C.RESET}")
+def med(msg):   print(f"  {C.YELLOW}[MED]{C.RESET}  {msg}")
+def section(title):
+    print(f"\n{C.CYAN}{C.BOLD}{'─'*55}")
+    print(f"  ⚡ {title}")
+    print(f"{'─'*55}{C.RESET}")
+
+# ─────────────────────────────────────────────
+#  HTTP HELPER
+# ─────────────────────────────────────────────
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def fetch(url, method="GET", data=None, extra_headers=None, timeout=10, verify_ssl=False):
+    try:
+        if not url.startswith("http"):
+            url = "https://" + url
+        headers = {**HEADERS, **(extra_headers or {})}
+        if data and isinstance(data, dict):
+            data = urllib.parse.urlencode(data).encode()
+        elif data and isinstance(data, str):
+            data = data.encode()
+
+        ctx = ssl.create_default_context()
+        if not verify_ssl:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            body = resp.read(1024*512).decode("utf-8", errors="ignore")
+            return {"status": resp.status, "headers": dict(resp.headers), "body": body, "url": resp.url}
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(1024*512).decode("utf-8", errors="ignore")
+        except:
+            body = ""
+        return {"status": e.code, "headers": dict(e.headers), "body": body, "url": url}
+    except Exception as e:
+        return {"status": 0, "headers": {}, "body": str(e), "url": url}
+
+
+# ─────────────────────────────────────────────
+#  MODULE 1: CORS MISCONFIGURATION
+# ─────────────────────────────────────────────
+def check_cors(target):
+    section("CORS MISCONFIGURATION SCAN")
+    info(f"Testing CORS on {target}")
+    domain = target.replace("https://","").replace("http://","").split("/")[0]
+    
+    test_origins = [
+        "https://evil.com",
+        f"https://{domain}.evil.com",
+        f"https://evil{domain}",
+        "null",
+        "https://attacker.com",
+    ]
+    
+    findings = []
+    for origin in test_origins:
+        r = fetch(target, extra_headers={"Origin": origin})
+        acao = r["headers"].get("Access-Control-Allow-Origin", "")
+        acac = r["headers"].get("Access-Control-Allow-Credentials", "")
+        
+        if acao == origin or acao == "*":
+            if acac.lower() == "true":
+                vuln(f"Critical CORS! Origin={origin} | ACAO={acao} | ACAC={acac}")
+                vuln(f"  Authenticated cross-origin data theft possible!")
+                findings.append({"severity": "CRITICAL", "origin": origin, "acao": acao, "acac": acac})
+            elif acao == "*":
+                med(f"CORS wildcard (*) set — check if sensitive data exposed")
+            else:
+                high(f"CORS reflects origin (no credentials): {origin}")
+                findings.append({"severity": "HIGH", "origin": origin, "acao": acao})
+        else:
+            ok(f"Origin rejected: {origin}")
+    
+    if not findings:
+        ok("No critical CORS issues found")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 2: SECURITY HEADERS AUDIT
+# ─────────────────────────────────────────────
+def check_security_headers(target):
+    section("SECURITY HEADERS AUDIT")
+    r = fetch(target)
+    h = {k.lower(): v for k, v in r["headers"].items()}
+    findings = []
+
+    checks = [
+        ("strict-transport-security",   "HSTS missing — downgrade/MITM attacks possible",       "HIGH"),
+        ("content-security-policy",     "CSP missing — XSS impact greatly amplified",            "MED"),
+        ("x-frame-options",             "Clickjacking possible (no X-Frame-Options)",            "MED"),
+        ("x-content-type-options",      "MIME sniffing enabled (missing X-Content-Type-Options)","LOW"),
+        ("referrer-policy",             "Referrer-Policy missing — URL data leakage",            "LOW"),
+        ("permissions-policy",          "Permissions-Policy missing",                            "LOW"),
+    ]
+
+    for header, msg, severity in checks:
+        if header not in h:
+            if severity == "HIGH": high(msg)
+            elif severity == "MED": med(msg)
+            else: warn(msg)
+            findings.append({"header": header, "issue": msg, "severity": severity})
+        else:
+            ok(f"{header}: {h[header][:60]}")
+
+    # Info disclosure headers
+    for bh in ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version"]:
+        if bh in h:
+            med(f"Info disclosure: {bh}: {h[bh]}")
+            findings.append({"header": bh, "issue": f"Version disclosure: {h[bh]}", "severity": "MED"})
+
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 3: OPEN REDIRECT HUNT
+# ─────────────────────────────────────────────
+def check_open_redirect(target):
+    section("OPEN REDIRECT SCAN")
+    
+    payloads = [
+        "//evil.com",
+        "https://evil.com",
+        "////evil.com",
+        "/\\evil.com",
+        "%2F%2Fevil.com",
+        "javascript:alert(1)",
+    ]
+    
+    params = ["redirect", "redirect_uri", "next", "url", "return", "returnurl",
+              "return_url", "goto", "continue", "dest", "destination", "redir",
+              "redirect_to", "after", "back", "callback", "forward", "location"]
+    
+    findings = []
+    base = target.rstrip("/")
+    
+    for param in params:
+        for payload in payloads[:3]:
+            test_url = f"{base}/?{param}={urllib.parse.quote(payload, safe='')}"
+            r = fetch(test_url, timeout=8)
+            loc = r["headers"].get("Location", "")
+            if loc and ("evil.com" in loc or "javascript" in loc.lower()):
+                vuln(f"Open Redirect! param={param} → redirects to: {loc}")
+                findings.append({"param": param, "payload": payload, "redirect": loc})
+                break
+    
+    if not findings:
+        ok("No open redirects found on common params")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 4: SUBDOMAIN TAKEOVER CHECK
+# ─────────────────────────────────────────────
+TAKEOVER_SIGNATURES = {
+    "GitHub Pages":   ["There isn't a GitHub Pages site here"],
+    "Heroku":         ["No such app", "herokucdn.com/error-pages/no-such-app"],
+    "Shopify":        ["Sorry, this shop is currently unavailable"],
+    "Fastly":         ["Fastly error: unknown domain"],
+    "Ghost":          ["The thing you were looking for is no longer here"],
+    "Tumblr":         ["Whatever you were looking for doesn't live here"],
+    "Zendesk":        ["Help Center Closed"],
+    "UserVoice":      ["This UserVoice subdomain is currently available"],
+    "Surge.sh":       ["project not found"],
+    "AWS S3":         ["NoSuchBucket", "The specified bucket does not exist"],
+    "Bitbucket":      ["Repository not found"],
+    "Readme.io":      ["Project doesnt exist... yet!"],
+    "Webflow":        ["The page you are looking for doesn't exist"],
+    "Netlify":        ["Not Found - Request ID"],
+    "Pantheon":       ["The gods are wise"],
+}
+
+def check_subdomain_takeover(subdomains):
+    section("SUBDOMAIN TAKEOVER CHECK")
+    findings = []
+    
+    def check_one(sub):
+        r = fetch(f"https://{sub}", timeout=8)
+        if r["status"] == 0:
+            r = fetch(f"http://{sub}", timeout=8)
+        body = r["body"].lower()
+        for service, sigs in TAKEOVER_SIGNATURES.items():
+            for sig in sigs:
+                if sig.lower() in body:
+                    vuln(f"Possible takeover: {sub} → {service}")
+                    return {"subdomain": sub, "service": service, "signature": sig, "severity": "CRITICAL"}
+        return None
+
+    if not subdomains:
+        warn("No subdomains provided. Use --subs file.txt")
+        return findings
+
+    info(f"Checking {len(subdomains)} subdomains for takeover...")
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futures = {ex.submit(check_one, s): s for s in subdomains}
+        for f in as_completed(futures):
+            res = f.result()
+            if res:
+                findings.append(res)
+
+    if not findings:
+        ok("No takeover candidates found")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 5: SENSITIVE FILE & PATH EXPOSURE
+# ─────────────────────────────────────────────
+SENSITIVE_PATHS = [
+    "/.git/HEAD", "/.git/config", "/.git/COMMIT_EDITMSG",
+    "/.svn/entries", "/.hg/hgrc",
+    "/.env", "/.env.local", "/.env.production", "/.env.backup",
+    "/config.php", "/config.js", "/config.json", "/config.yml",
+    "/configuration.php", "/settings.py", "/local_settings.py",
+    "/application.yml", "/application.properties",
+    "/backup.zip", "/backup.sql", "/db.sql", "/database.sql",
+    "/dump.sql", "/backup.tar.gz", "/www.zip", "/site.zip",
+    "/admin", "/administrator", "/wp-admin", "/phpmyadmin",
+    "/adminer.php", "/phpinfo.php", "/info.php", "/test.php",
+    "/debug", "/console", "/actuator", "/actuator/env",
+    "/actuator/mappings", "/actuator/health", "/actuator/metrics",
+    "/api/swagger", "/swagger-ui.html", "/swagger.json",
+    "/openapi.json", "/api-docs", "/v1/api-docs", "/v2/api-docs",
+    "/graphql", "/graphiql", "/__graphql",
+    "/logs/error.log", "/error.log", "/access.log", "/debug.log",
+    "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+    "/.DS_Store", "/web.config", "/WEB-INF/web.xml",
+]
+
+def check_sensitive_paths(target):
+    section("SENSITIVE FILE & ENDPOINT EXPOSURE")
+    base = target.rstrip("/")
+    findings = []
+
+    def probe(path):
+        url = base + path
+        r = fetch(url, timeout=6)
+        if r["status"] in [200, 206]:
+            size = len(r["body"])
+            snippet = r["body"][:80].replace("\n", " ").strip()
+            return {"path": path, "status": r["status"], "size": size, "snippet": snippet}
+        return None
+
+    info(f"Probing {len(SENSITIVE_PATHS)} sensitive paths...")
+    found_count = 0
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futures = {ex.submit(probe, p): p for p in SENSITIVE_PATHS}
+        for f in as_completed(futures):
+            res = f.result()
+            if res:
+                found_count += 1
+                msg = f"{res['path']} ({res['status']}, {res['size']}b) → {res['snippet']}"
+                if any(x in res["path"] for x in [".git", ".env", ".sql", "actuator/env"]):
+                    vuln(msg); sev = "CRITICAL"
+                elif any(x in res["path"] for x in ["swagger", "graphiql", "phpinfo", "adminer"]):
+                    high(msg); sev = "HIGH"
+                else:
+                    med(msg); sev = "MED"
+                findings.append({**res, "severity": sev})
+
+    if found_count == 0:
+        ok("No sensitive files exposed")
+    else:
+        warn(f"Found {found_count} exposed path(s)!")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 6: HOST HEADER INJECTION
+# ─────────────────────────────────────────────
+def check_host_header(target):
+    section("HOST HEADER INJECTION (Password Reset Poisoning)")
+    findings = []
+    evil = "evil-attacker.com"
+    
+    paths = ["/", "/forgot-password", "/reset-password", "/account/recover",
+             "/users/password/new", "/auth/forgot", "/password-reset"]
+    
+    for path in paths:
+        url = target.rstrip("/") + path
+        r = fetch(url, extra_headers={"Host": evil, "X-Forwarded-Host": evil}, timeout=8)
+        if evil in r["body"]:
+            vuln(f"Host Header Injection at {path} — reflects '{evil}'!")
+            vuln(f"  Password reset poisoning is possible!")
+            findings.append({"path": path, "injected": evil, "severity": "CRITICAL"})
+        else:
+            r2 = fetch(url, extra_headers={"X-Forwarded-Host": evil}, timeout=8)
+            if evil in r2["body"]:
+                high(f"X-Forwarded-Host reflected at {path}")
+                findings.append({"path": path, "injected": evil, "severity": "HIGH"})
+
+    if not findings:
+        ok("No Host header injection found on tested paths")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 7: JS FILE SECRET SCAN
+# ─────────────────────────────────────────────
+SECRET_PATTERNS = {
+    "AWS Access Key":    r"AKIA[0-9A-Z]{16}",
+    "AWS Secret Key":    r"(?i)aws.{0,20}['\"][0-9a-zA-Z/+]{40}['\"]",
+    "Google API Key":    r"AIza[0-9A-Za-z\-_]{35}",
+    "GitHub Token":      r"ghp_[0-9a-zA-Z]{36}|github_pat_[0-9a-zA-Z_]{82}",
+    "Stripe Live Key":   r"sk_live_[0-9a-zA-Z]{24}",
+    "Slack Token":       r"xox[baprs]-[0-9A-Za-z\-]{10,48}",
+    "Slack Webhook":     r"https://hooks\.slack\.com/services/T[0-9A-Z]+/B[0-9A-Z]+/[0-9A-Za-z]+",
+    "SendGrid Key":      r"SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}",
+    "Firebase URL":      r"[a-z0-9\-]+\.firebaseio\.com",
+    "Private Key Block": r"-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----",
+    "Password in JS":    r"(?i)(password|passwd|secret|token|api_key|apikey)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
+    "JWT Token":         r"eyJ[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_.+/=]+",
+    "Basic Auth in URL": r"https?://[^:@\s]+:[^@\s]+@",
+    "S3 Bucket":         r"[a-z0-9\-\.]+\.s3\.amazonaws\.com|s3://[a-z0-9\-\.]+",
+    "Internal IP":       r"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+}
+
+def scan_js_secrets(target):
+    section("JS FILE SECRET & SENSITIVE DATA SCAN")
+    findings = []
+    
+    r = fetch(target)
+    js_files = re.findall(r'src=["\']([^"\']*\.js[^"\']*)["\']', r["body"])
+    
+    base_url = target.rstrip("/")
+    full_js_urls = []
+    for js in js_files:
+        if js.startswith("http"):
+            full_js_urls.append(js)
+        elif js.startswith("//"):
+            full_js_urls.append("https:" + js)
+        elif js.startswith("/"):
+            full_js_urls.append(base_url + js)
+        else:
+            full_js_urls.append(base_url + "/" + js)
+    
+    if not full_js_urls:
+        warn("No JS files found on homepage. Try authenticated endpoints manually.")
+        return findings
+    
+    info(f"Scanning {len(full_js_urls)} JS files for secrets...")
+    
+    for js_url in full_js_urls[:30]:
+        r = fetch(js_url, timeout=10)
+        if r["status"] != 200:
+            continue
+        content = r["body"]
+        fname = js_url.split("/")[-1][:40]
+        for name, pattern in SECRET_PATTERNS.items():
+            matches = re.findall(pattern, content)
+            for match in matches:
+                m = match if isinstance(match, str) else match[0]
+                if len(m) > 5:
+                    vuln(f"[{name}] in {fname}: {m[:80]}")
+                    findings.append({"type": name, "file": js_url, "match": m[:100], "severity": "CRITICAL"})
+    
+    if not findings:
+        ok("No secrets found in JS files")
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 8: COOKIE SECURITY AUDIT
+# ─────────────────────────────────────────────
+def check_cookies(target):
+    section("COOKIE SECURITY AUDIT")
+    findings = []
+    r = fetch(target)
+    
+    raw_cookies = [v for k, v in r["headers"].items() if k.lower() == "set-cookie"]
+    
+    if not raw_cookies:
+        warn("No cookies set on initial request — try an authenticated path")
+        return findings
+    
+    for cookie in raw_cookies:
+        name = cookie.split("=")[0].strip()
+        cl = cookie.lower()
+        issues = []
+        
+        if "httponly" not in cl:
+            issues.append("Missing HttpOnly — XSS can steal this cookie")
+        if "secure" not in cl:
+            issues.append("Missing Secure flag — sent over plain HTTP")
+        if "samesite" not in cl:
+            issues.append("Missing SameSite — CSRF risk")
+        if "samesite=none" in cl and "secure" not in cl:
+            issues.append("SameSite=None without Secure flag (invalid)")
+        
+        is_sensitive = any(x in name.lower() for x in ["sess", "token", "auth", "jwt", "user", "id"])
+        
+        if issues and is_sensitive:
+            for issue in issues:
+                vuln(f"Cookie '{name}': {issue}")
+                findings.append({"cookie": name, "issue": issue, "severity": "HIGH"})
+        elif issues:
+            for issue in issues:
+                med(f"Cookie '{name}': {issue}")
+                findings.append({"cookie": name, "issue": issue, "severity": "MED"})
+        else:
+            ok(f"Cookie '{name}' — all security flags present")
+    
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  MODULE 9: SUBDOMAIN DISCOVERY
+# ─────────────────────────────────────────────
+def discover_subdomains(domain):
+    section(f"SUBDOMAIN DISCOVERY — {domain}")
+    found = set()
+    
+    info("Querying crt.sh (certificate transparency)...")
+    try:
+        r = fetch(f"https://crt.sh/?q=%.{domain}&output=json", timeout=20)
+        if r["status"] == 200:
+            data = json.loads(r["body"])
+            for entry in data:
+                name = entry.get("name_value", "")
+                for n in name.split("\n"):
+                    n = n.strip().lstrip("*.")
+                    if domain in n and " " not in n and len(n) < 100:
+                        found.add(n)
+        ok(f"crt.sh: {len(found)} entries")
+    except Exception as e:
+        warn(f"crt.sh failed: {e}")
+    
+    info("Querying HackerTarget...")
+    try:
+        r = fetch(f"https://api.hackertarget.com/hostsearch/?q={domain}", timeout=15)
+        if r["status"] == 200 and "error check your" not in r["body"].lower():
+            for line in r["body"].splitlines():
+                if "," in line:
+                    sub = line.split(",")[0].strip()
+                    if domain in sub:
+                        found.add(sub)
+    except:
+        pass
+
+    if found:
+        ok(f"Found {len(found)} unique subdomains:")
+        for s in sorted(found)[:50]:
+            print(f"    {C.CYAN}{s}{C.RESET}")
+        if len(found) > 50:
+            warn(f"...and {len(found)-50} more")
+    else:
+        warn("No subdomains found via passive recon")
+    
+    return sorted(found)
+
+
+# ─────────────────────────────────────────────
+#  MODULE 10: HTTP METHOD TAMPERING
+# ─────────────────────────────────────────────
+def check_http_methods(target):
+    section("HTTP METHOD TAMPERING")
+    findings = []
+    dangerous_methods = ["PUT", "DELETE", "PATCH", "TRACE", "OPTIONS", "PROPFIND", "MOVE"]
+    
+    for method in dangerous_methods:
+        r = fetch(target, method=method, timeout=8)
+        if r["status"] not in [405, 501, 403, 0]:
+            if method == "TRACE" and ("TRACE" in r["body"] or r["status"] == 200):
+                vuln(f"TRACE method enabled — XST (Cross-Site Tracing) possible!")
+                findings.append({"method": method, "status": r["status"], "severity": "MED"})
+            elif method in ["PUT", "DELETE"] and r["status"] < 400:
+                high(f"{method} method returned {r['status']} — file operations may be allowed!")
+                findings.append({"method": method, "status": r["status"], "severity": "HIGH"})
+            elif method == "OPTIONS":
+                allowed = r["headers"].get("Allow", r["headers"].get("allow", ""))
+                if allowed:
+                    info(f"OPTIONS Allow: {allowed}")
+            else:
+                med(f"{method} returned {r['status']}")
+                findings.append({"method": method, "status": r["status"], "severity": "LOW"})
+        else:
+            ok(f"{method}: {r['status']} (properly restricted)")
+    
+    return findings
+
+
+# ─────────────────────────────────────────────
+#  REPORT GENERATOR
+# ─────────────────────────────────────────────
+def generate_report(target, all_findings, output_file=None):
+    section("SCAN COMPLETE — SUMMARY REPORT")
+    
+    total    = sum(len(v) for v in all_findings.values())
+    critical = sum(1 for m in all_findings.values() for f in m if isinstance(f, dict) and f.get("severity") == "CRITICAL")
+    high_c   = sum(1 for m in all_findings.values() for f in m if isinstance(f, dict) and f.get("severity") == "HIGH")
+    med_c    = sum(1 for m in all_findings.values() for f in m if isinstance(f, dict) and f.get("severity") == "MED")
+    
+    print(f"\n  {C.BOLD}Target:{C.RESET} {target}")
+    print(f"  {C.BOLD}Scanned:{C.RESET} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n  {C.RED}{C.BOLD}⚠  Critical : {critical}{C.RESET}")
+    print(f"  {C.ORANGE}▲  High     : {high_c}{C.RESET}")
+    print(f"  {C.YELLOW}●  Medium   : {med_c}{C.RESET}")
+    print(f"  {C.BLUE}   Total    : {total}{C.RESET}")
+    
+    if output_file:
+        report = {
+            "tool": "Karna by Aditya Bhosale",
+            "target": target,
+            "scan_time": datetime.now().isoformat(),
+            "summary": {"critical": critical, "high": high_c, "medium": med_c, "total": total},
+            "findings": all_findings
+        }
+        with open(output_file, "w") as fp:
+            json.dump(report, fp, indent=2)
+        ok(f"JSON report saved → {output_file}")
+    
+    print(f"\n  {C.DIM}Karna by Aditya Bhosale — For authorized testing only{C.RESET}\n")
+
+
+# ─────────────────────────────────────────────
+#  CLI ENTRYPOINT
+# ─────────────────────────────────────────────
+def main():
+    banner()
+    
+    parser = argparse.ArgumentParser(
+        prog="karna",
+        description="Karna — Bug Bounty Hunter | by Aditya Bhosale",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+Examples:
+  python3 karna.py -t https://example.com --all -o report.json
+  python3 karna.py -t https://example.com --cors --headers --js
+  python3 karna.py -d example.com --subdomains --takeover
+  python3 karna.py -t https://example.com --paths --host-header --cookies
+        """
+    )
+    
+    parser.add_argument("-t", "--target",       help="Target URL (e.g. https://example.com)")
+    parser.add_argument("-d", "--domain",       help="Domain for subdomain discovery")
+    parser.add_argument("--subs",               help="File with subdomains list (for takeover check)")
+    parser.add_argument("-o", "--output",       help="Save JSON report to this file")
+    parser.add_argument("--all",                action="store_true", help="Run ALL modules")
+    parser.add_argument("--cors",               action="store_true", help="CORS misconfiguration check")
+    parser.add_argument("--headers",            action="store_true", help="Security headers audit")
+    parser.add_argument("--redirect",           action="store_true", help="Open redirect scan")
+    parser.add_argument("--takeover",           action="store_true", help="Subdomain takeover check")
+    parser.add_argument("--paths",              action="store_true", help="Sensitive file/path exposure")
+    parser.add_argument("--host-header",        action="store_true", help="Host header injection")
+    parser.add_argument("--js",                 action="store_true", help="JS secret scan")
+    parser.add_argument("--cookies",            action="store_true", help="Cookie security audit")
+    parser.add_argument("--methods",            action="store_true", help="HTTP method tampering")
+    parser.add_argument("--subdomains",         action="store_true", help="Passive subdomain discovery")
+    
+    args = parser.parse_args()
+    
+    if not args.target and not args.domain:
+        parser.print_help()
+        sys.exit(0)
+    
+    all_findings = {}
+    target = args.target
+    if not target and args.domain:
+        target = f"https://{args.domain}"
+    domain = args.domain or target.replace("https://","").replace("http://","").split("/")[0]
+    
+    subdomains = []
+    if args.subs:
+        try:
+            with open(args.subs) as f:
+                subdomains = [line.strip() for line in f if line.strip()]
+            info(f"Loaded {len(subdomains)} subdomains from {args.subs}")
+        except:
+            err(f"Could not read: {args.subs}")
+    
+    run_all = args.all
+    
+    try:
+        if target:
+            if run_all or args.cors:
+                all_findings["cors"] = check_cors(target)
+            if run_all or args.headers:
+                all_findings["headers"] = check_security_headers(target)
+            if run_all or args.redirect:
+                all_findings["open_redirect"] = check_open_redirect(target)
+            if run_all or args.host_header:
+                all_findings["host_header"] = check_host_header(target)
+            if run_all or args.paths:
+                all_findings["sensitive_paths"] = check_sensitive_paths(target)
+            if run_all or args.js:
+                all_findings["js_secrets"] = scan_js_secrets(target)
+            if run_all or args.cookies:
+                all_findings["cookies"] = check_cookies(target)
+            if run_all or args.methods:
+                all_findings["http_methods"] = check_http_methods(target)
+        
+        if domain:
+            if run_all or args.subdomains:
+                subdomains = discover_subdomains(domain)
+            if run_all or args.takeover:
+                if not subdomains:
+                    warn("No subdomains available for takeover check. Run --subdomains first or use --subs")
+                else:
+                    all_findings["takeover"] = check_subdomain_takeover(subdomains)
+        
+        if all_findings:
+            generate_report(target or domain, all_findings, args.output)
+        else:
+            warn("No modules ran. Use --all or pick specific checks. See --help.")
+    
+    except KeyboardInterrupt:
+        print(f"\n\n{C.YELLOW}  [!] Scan interrupted by user.{C.RESET}\n")
+        sys.exit(0)
+    except Exception as e:
+        err(f"Unexpected error: {e}")
+        raise
+
+if __name__ == "__main__":
+    main()
